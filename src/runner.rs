@@ -1020,18 +1020,57 @@ mod tests {
 
     /// The fake relay of `examples/fake_relay.rs`, built alongside the tests.
     ///
-    /// Cargo copies it to `<target>/<profile>/examples/`. The test binary is somewhere
-    /// below `<target>/<profile>` (`deps/` before Cargo 1.100, `build/<crate>/<hash>/out/`
-    /// since), or in a separate build directory, so look up from it, then in `target/`.
+    /// Where Cargo puts it depends on its version and on whether the build directory is apart
+    /// from the target directory, so look at every level above the test binary for each form
+    /// Cargo uses, and take the newest:
+    /// - `<profile>/examples/fake_relay`, the copy Cargo hands out;
+    /// - `<profile>/examples/fake_relay-<hash>`, the build's own before Rust 1.100;
+    /// - `<profile>/build/<crate>/<hash>/out/fake_relay`, the build's own since Rust 1.100;
+    /// - `target/debug/examples/fake_relay` under the crate, the default target directory.
     fn fake_relay() -> PathBuf {
         let tests = env::current_exe().expect("the test binary's path");
-        let fallback = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug");
-        let program = tests
-            .ancestors()
-            .chain([fallback.as_path()])
-            .map(|dir| dir.join("examples").join("fake_relay"))
-            .find(|program| program.is_file());
-        program
+        let entries = |dir: &Path| {
+            std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>()
+        };
+        let mut candidates =
+            vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/examples/fake_relay")];
+        for dir in tests.ancestors().skip(1) {
+            let examples = dir.join("examples");
+            candidates.push(examples.join("fake_relay"));
+            candidates.extend(entries(&examples).into_iter().filter(|path| {
+                path.extension().is_none()
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("fake_relay-"))
+            }));
+            if dir.parent().and_then(Path::file_name) == Some("build".as_ref()) {
+                candidates.extend(
+                    entries(dir)
+                        .into_iter()
+                        .map(|unit| unit.join("out").join("fake_relay")),
+                );
+            }
+        }
+        candidates
+            .into_iter()
+            .filter_map(|path| {
+                Some((
+                    path.metadata()
+                        .ok()
+                        .filter(|m| m.is_file())?
+                        .modified()
+                        .ok()?,
+                    path,
+                ))
+            })
+            .max()
+            .map(|(_, path)| path)
             .unwrap_or_else(|| panic!("examples/fake_relay is not built near {}", tests.display()))
     }
 
